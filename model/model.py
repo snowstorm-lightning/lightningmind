@@ -1,4 +1,9 @@
 from transformers import PretrainedConfig
+import torch
+from torch import nn
+import torch.nn.functional as F
+import math
+from transformers.activations import ACT2FN
 
 
 class LightningMindConfig(PretrainedConfig):
@@ -73,10 +78,7 @@ class LightningMindConfig(PretrainedConfig):
         self.seq_aux = seq_aux  # 是否在序列级别上计算辅助损失
         self.norm_topk_prob = norm_topk_prob  # 是否标准化top-k概率
         
-import torch
-from torch import nn
-import torch.nn.functional as F
-import math
+
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int,eps: float = 1e-6):
@@ -147,8 +149,6 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(self.n_local_heads * self.head_dim, args.hidden_size, bias=False)
         self.attn_dropout = nn.Dropout(args.dropout)
-        self.resid_dropout = nn.Dropout(args.dropout)
-        self.dropout = args.dropout
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention") and args.flash_attn
         
     def forward(self, 
@@ -193,5 +193,21 @@ class Attention(nn.Module):
             output = scores @ xv
             
         output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
-        output = self.resid_dropout(self.out_proj(output))
+        output = self.out_proj(output)
         return output, past_key_value
+    
+    
+class FeedForward(nn.Module):
+    def __init__(self, config: LightningMindConfig):
+        super().__init__()
+        if config.intermediate_size is None:
+            intermediate_size = int(config.hidden_size * 8 / 3)
+            config.intermediate_size = 64 * ((intermediate_size + 64 - 1) // 64)
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+        self.act_fn = ACT2FN[config.hidden_act]
+        
+    def forward(self, x: torch.Tensor):
+        return self.down_proj(self.dropout(self.act_fn(self.gate_proj(x)) * self.up_proj(x)))
