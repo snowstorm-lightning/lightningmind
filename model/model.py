@@ -139,7 +139,7 @@ def repeat_kv(x: torch.Tensor, n_repeat:int) -> torch.Tensor:
 class Attention(nn.Module):
     def __init__(self, args: LightningMindConfig):
         super().__init__()
-        self.num_key_value_heads = args.num_key_value_heads if args.num_key_value_heads is None else args.num_key_value_heads
+        self.num_key_value_heads = args.num_attention_heads if args.num_key_value_heads is None else args.num_key_value_heads
         assert args.num_attention_heads % self.num_key_value_heads == 0, "num_attention_heads must be divisible by num_key_value_heads"
         self.n_local_heads = args.num_attention_heads
         self.n_local_kv_heads = self.num_key_value_heads
@@ -292,7 +292,8 @@ class LightningMindModel(nn.Module):
             
         hidden_states = self.norm(hidden_states)
         # aux_loss = sum([l.mlp.aux_loss for l in self.layers if isinstance(l.mlp, MOEFeedForward)], hidden_states.new_zeros(1).squeeze())
-        return hidden_states, presents
+        aux_loss = 0.0
+        return hidden_states, presents, aux_loss
         
 class LightningMindForCausalLM(PreTrainedModel, GenerationMixin):
     config_class = LightningMindConfig
@@ -311,7 +312,7 @@ class LightningMindForCausalLM(PreTrainedModel, GenerationMixin):
                 use_cache: bool = False,
                 logits_to_keep: int | torch.Tensor = 0,
                 **args):
-        hidden_states, past_key_values = self.model(
+        hidden_states, past_key_values, aux_loss = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -328,5 +329,5 @@ class LightningMindForCausalLM(PreTrainedModel, GenerationMixin):
             loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100)
 
         output = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
-        # output.aux_loss = aux_loss
+        output.aux_loss = aux_loss
         return output
