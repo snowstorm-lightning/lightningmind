@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Datasets
+dataset/*
+!dataset/
+!dataset/lm_dataset.py
+
+# Weights
+checkpoints/
+out/

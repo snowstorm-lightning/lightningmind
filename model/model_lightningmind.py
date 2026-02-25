@@ -149,6 +149,7 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(args.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(self.n_local_heads * self.head_dim, args.hidden_size, bias=False)
+        self.dropout = args.dropout
         self.attn_dropout = nn.Dropout(args.dropout)
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention") and args.flash_attn
         
@@ -264,12 +265,13 @@ class LightningMindModel(nn.Module):
     def forward(self,
                 input_ids: torch.Tensor,
                 attention_mask: torch.Tensor | None = None,
+                past_key_values: tuple[torch.Tensor, torch.Tensor] | None = None,
                 use_cache: bool = False,
                 **kwargs):
         batch_size, seq_len = input_ids.shape
         if hasattr(past_key_values,'layers'):
             past_key_values = None
-        past_key_values = past_key_values.layers or [None] * len(self.layers)
+        past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         
         hidden_states = self.dropout(self.embed_tokens(input_ids))
@@ -309,6 +311,7 @@ class LightningMindForCausalLM(PreTrainedModel, GenerationMixin):
                 input_ids: torch.Tensor | None = None,
                 attention_mask: torch.Tensor | None = None,
                 labels: torch.Tensor | None = None,
+                past_key_values: tuple[torch.Tensor, torch.Tensor] | None = None,
                 use_cache: bool = False,
                 logits_to_keep: int | torch.Tensor = 0,
                 **args):
