@@ -23,3 +23,10 @@ cd lightningmind
 ```bash
 uv sync
 ```
+
+### 3.将相关数据集和权重都下载到本地的dataset和checkpoints文件夹中
+
+### 4.运行代码
+```bash
+uv run eval_llm.py
+```
