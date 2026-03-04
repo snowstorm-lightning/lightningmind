@@ -57,6 +57,16 @@ uv run train_full_sft.py --from_weight pretrain
 uv run train_full_sft.py --from_weight pretrain --use_moe 1
 ```
 
+注意，训练ppo和grpo模型时，需要提前下载reward模型，我这里使用的是Skywork-Reward-V2-Qwen3-1.7B模型，在项目根目录下，使用如下命令行下载（models文件夹和lightningmind同级，你也可以按照自己的喜好存放该命令，使用reward_model_path指定对应路径）
+```bash
+hf download Skywork/Skywork-Reward-V2-Qwen3-1.7B --local-dir "../models/Skywork-Reward-1.7B"
+```
+随后训练
+```bash
+cd trainer
+uv run train_ppo.py --reward_model_path "../../models/Skywork-Reward-1.7B"
+```
+
 ### 5.测试模型效果
 确保需要测试的模型*.pth文件位于./out/目录下。
 这里weight后面的参数表示要使用哪一种模型权重。

@@ -1,5 +1,7 @@
 import os
+from pyexpat.errors import messages
 import sys
+from urllib import response
 
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -10,14 +12,13 @@ import warnings
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from transformers import AutoTokenizer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from contextlib import nullcontext
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from transformers import AutoModel
 from model.model_lightningmind import LightningMindConfig, LightningMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model
@@ -39,6 +40,21 @@ class CriticModel(LightningMindForCausalLM):
         # 使用value_head获取价值估计
         values = self.value_head(hidden_states).squeeze(-1)
         return values
+    
+def get_score(reward_model, reward_tokenizer, messages):
+    # 1. 使用 tokenizer 的默认模板组装对话字符串
+    text = reward_tokenizer.apply_chat_template(messages, tokenize=False)
+    
+    # 2. 编码并移动到模型所在的设备 (Shape tracking: [1, Seq_Len])
+    inputs = reward_tokenizer(text, return_tensors="pt").to(reward_model.device)
+    
+    # 3. 执行标准前向传播，取出 Logits 作为打分
+    with torch.no_grad():
+        outputs = reward_model(**inputs)
+        # Shape tracking: outputs.logits -> [1, 1], squeeze 后变成纯标量 (float)
+        score = outputs.logits.squeeze().item()
+        
+    return score
 
 
 def calculate_rewards(prompts, responses, reward_model, reward_tokenizer):
@@ -93,8 +109,8 @@ def calculate_rewards(prompts, responses, reward_model, reward_tokenizer):
             messages = [{"role": role, "content": content.strip()} for role, content in matches]
 
             tmp_chat = messages + [{"role": "assistant", "content": response}]
-            score = reward_model.get_score(reward_tokenizer, tmp_chat)
-
+            
+            score = get_score(reward_model, reward_tokenizer, tmp_chat)
             scale = 3.0
             score = max(min(score, scale), -scale)
 
@@ -105,7 +121,7 @@ def calculate_rewards(prompts, responses, reward_model, reward_tokenizer):
                     answer_content = answer_match.group(1).strip()
                     # 对answer内容单独计算reward
                     tmp_chat = messages + [{"role": "assistant", "content": answer_content}]
-                    answer_score = reward_model.get_score(reward_tokenizer, tmp_chat)
+                    answer_score = get_score(reward_model, reward_tokenizer, tmp_chat)
                     answer_score = max(min(answer_score, scale), -scale)
                     score = score * 0.4 + answer_score * 0.6
             reward_model_scores.append(score)
@@ -274,7 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--kl_coef", type=float, default=0.02, help="KL散度惩罚系数")
     parser.add_argument("--reasoning", type=int, default=1, choices=[0, 1], help='推理模型类型（0=普通模型，1=推理模型）')
     parser.add_argument("--update_old_actor_freq", type=int, default=4, help="更新old_actor_model的频率")
-    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
+    parser.add_argument("--reward_model_path", type=str, default="../../models/Skywork-Reward-1.7B", help="Reward模型路径")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="LightningMind-PPO", help="wandb项目名")
@@ -326,11 +342,13 @@ if __name__ == "__main__":
     critic_model.load_state_dict(state_dict, strict=False)
     critic_model = critic_model.to(args.device)
     # Reward模型
-    reward_model = AutoModel.from_pretrained(
-        args.reward_model_path, torch_dtype=torch.float16, trust_remote_code=True
-    )
+    reward_model = AutoModelForSequenceClassification.from_pretrained(
+            args.reward_model_path, 
+            torch_dtype=torch.float16,
+            num_labels=1 # Reward Model 输出一个标量分数
+        ).to(args.device).eval().requires_grad_(False)
     reward_model = reward_model.to(args.device).eval().requires_grad_(False)
-    reward_tokenizer = AutoTokenizer.from_pretrained(args.reward_model_path, trust_remote_code=True)
+    reward_tokenizer = AutoTokenizer.from_pretrained(args.reward_model_path)
     # 数据和优化器
     train_ds = RLAIFDataset(args.data_path, tokenizer, max_length=(args.max_seq_len + args.max_gen_len))
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
