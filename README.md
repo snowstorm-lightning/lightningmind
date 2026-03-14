@@ -1,85 +1,156 @@
-# LightningMind - 安装指南
+<h1 align="center">⚡ LightningMind</h1>
+<p align="center">
+  <b>从零手写的轻量级大语言模型全生命周期训练框架</b><br>
+  <i>Pre-train ➔ SFT ➔ DPO/PPO/GRPO ➔ MoE 架构</i>
+</p>
+
+## 📖 项目简介
+
+**LightningMind** 是一个从零手写实现的轻量级 Transformer Decoder 大语言模型。本项目不仅实现了稠密模型（Dense）的完整数据流，还从零构建了基于路由机制的**混合专家模型 (MoE)**。
+
+更重要的是，本项目完整工程化了当前大模型最核心的训练管线，包含：
+1. **预训练 (Pre-training)**：构建模型的基础语言能力与世界知识。
+2. **监督微调 (SFT)**：对齐人类对话指令格式。
+3. **强化学习与人类反馈对齐 (RLHF)**：全面实现了 **PPO**、**DPO** 以及 DeepSeek 提出的高效强化学习算法 **GRPO**。
+
+---
+
+## 🧠 核心架构与数学原理
+
+### 1. Transformer 数据流与维度追踪 (Shape Tracking)
+在底层算子实现上，本项目极其注重张量维度的精准控制与显存对齐。以核心的 `Self-Attention` 模块为例，我们在计算时严格执行因果掩码（Causal Mask），彻底杜绝未来信息穿越：
+
+```python
+# [Batch, Num_Heads, Seq_Len, Head_Dim] @ [Batch, Num_Heads, Head_Dim, Seq_Len] 
+# -> Attention_Scores: [Batch, Num_Heads, Seq_Len, Seq_Len]
+```
+
+$$Attention(Q, K, V) = softmax\left(\frac{QK^T}{\sqrt{d_k}} + M\right)V$$
+
+*注：其中 $M$ 为下三角掩码矩阵，右上角元素为 $-\infty$，确保第 $t$ 个 Token 只能与 $\le t$ 的历史 Token 发生注意力交互。*
+
+
+
+### 混合专家架构 (MoE) 与负载均衡
+为提升模型容量且不显著增加推理计算量，本项目实现了 Sparse MoE 层。为了解决训练早期的路由坍塌 (Routing Collapse)——即所有 Token 都倾向于涌入极少数专家导致算力闲置，我们在前向传播中引入了负载均衡损失 (Load Balancing Loss)：
+
+$$L_{bal} = \alpha \cdot N \sum_{i=1}^{N} f_i \cdot P_i$$
+
+* $N$: 专家总数 (Number of Experts)
+* $f_i$: 当前 Batch 内路由到专家 $i$ 的 Token 比例
+* $P_i$: 路由网络输出给专家 $i$ 的平均门控概率
+* 通过将 $L_{bal}$ 加回主干 Loss，强制要求门控网络均匀派发 Token。
+
+# 🚀 LightningMind - 安装指南
 
 本项目使用 [uv](https://docs.astral.sh/uv/) 作为包管理器，以确保依赖项的高效管理和环境的一致性。
 
-## 环境要求
+## 1. 环境准备
 
 * **Python 版本**：需要 Python **3.14** 或更高版本。
-* **uv**：建议先安装 `uv`。如果尚未安装，请参考 [uv 官方安装指南](https://docs.astral.sh/uv/getting-started/installation/)。
 
-## 安装步骤
+* **包管理器**：建议先安装 `uv`。如果尚未安装，请参考 [uv 官方安装指南](https://docs.astral.sh/uv/getting-started/installation/)。
+
+  ```
+  # 克隆仓库
+  git clone git@github.com:snowstorm-lightning/lightningmind.git
+  cd lightningmind
+  
+  # 使用 uv 极速创建虚拟环境并同步所有依赖
+  uv sync
+  ```
+
+### 2. 数据集准备
+
+请将相关数据集下载到本地的 `dataset` 文件夹中。 🔗 **下载地址**: [MiniMind Dataset (ModelScope)](https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files)
+
+> 💡 **最佳实践**：默认推荐下载 `pretrain_hq.jsonl` + `sft_mini_512.jsonl`，这是最快速度复现 Zero 聊天模型的组合。数据文件可自由选择，可根据自己手头的训练需求和 GPU 资源进行适当组合。
 
 
-### 1. 克隆项目
-首先，将项目克隆到本地：
-```bash
-git clone git@github.com:snowstorm-lightning/lightningmind.git
-cd lightningmind
+
+## 🛠️ 全生命周期训练管线 (Training Pipeline)
+
+进入训练目录：
+
 ```
-
-### 2. 同步环境
-在项目根目录下运行以下命令。`uv` 会根据 `.python-version` 和 `pyproject.toml` 自动创建虚拟环境并安装所有依赖项：
-
-```bash
-uv sync
-```
-
-### 3.将相关数据集都下载到本地的dataset文件夹中
-从该地址下载数据集：https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files
-
-默认推荐下载pretrain_hq.jsonl + sft_mini_512.jsonl最快速度复现Zero聊天模型。
-
-数据文件可自由选择，下文提供了多种搭配方案，可根据自己手头的训练需求和GPU资源进行适当组合。
-
-### 4.训练模型
-训练时打开trainer文件夹
-```bash
 cd trainer
 ```
 
-使用如下命令行训练代码
-预训练
+### Phase 1: 预训练 (Pre-training)
+
+构建模型的 Next-Token Prediction 能力。
+
 ```bash
+# 训练稠密模型 (Dense)
 uv run train_pretrain.py
-```
-使用专家模型，可以用use_moe参数
-```bash
+
+# 🚀 开启 MoE 架构训练
 uv run train_pretrain.py --use_moe 1
 ```
-训练其他模型同理
 
-监督微调,from_weight表示使用哪个权重进行微调，现在是使用pretrain的权重，要求你之前已经训练过pretrain
+*(注：训练其他模型阶段的 MoE 参数使用方式同理)*
+
+### Phase 2: 监督微调 (Supervised Fine-Tuning)
+
+`from_weight` 表示使用哪个权重进行微调。此时要求你之前已经训练过预训练模型并生成了权重。
+
 ```bash
+# 从预训练权重启动 SFT
 uv run train_full_sft.py --from_weight pretrain
-```
-同理也可以用use_moe参数来使用专家模型
-```bash
+
+# 使用专家模型 (MoE) 进行 SFT
 uv run train_full_sft.py --from_weight pretrain --use_moe 1
 ```
 
-注意，训练ppo和grpo模型时，需要提前下载reward模型，我这里使用的是Skywork-Reward-V2-Qwen3-1.7B模型，在项目根目录下，使用如下命令行下载（models文件夹和lightningmind同级，你也可以按照自己的喜好存放该命令，使用reward_model_path指定对应路径）
-```bash
-hf download Skywork/Skywork-Reward-V2-Qwen3-1.7B --local-dir "../models/Skywork-Reward-1.7B"
+### Phase 3: 强化学习对齐 (RLHF: PPO / GRPO)
+
+注意：训练 PPO 和 GRPO 模型时，需要提前下载 Reward 模型。本项目默认使用 `Skywork-Reward-V2-Qwen3-1.7B`。
+
+Bash
+
 ```
-随后训练
-```bash
+# 1. 在项目根目录下，下载 Reward 模型到指定目录 (models 文件夹与 lightningmind 同级)
+hf download Skywork/Skywork-Reward-V2-Qwen3-1.7B --local-dir "../models/Skywork-Reward-1.7B"
+
+# 2. 回到 trainer 目录并启动 PPO 强化学习训练
 cd trainer
 uv run train_ppo.py --reward_model_path "../../models/Skywork-Reward-1.7B"
+
+# 3. 或者使用更节约显存的 GRPO 算法 (需根据代码实际脚本名称调整)
+uv run train_grpo.py --reward_model_path "../../models/Skywork-Reward-1.7B"
 ```
 
-### 5.测试模型效果
-确保需要测试的模型*.pth文件位于./out/目录下。
-这里weight后面的参数表示要使用哪一种模型权重。
+
+
+------
+
+## ⚖️ 工程权衡 (Engineering & Trade-offs)
+
+在打通全链路对齐管线时，我们深刻体会到了**显存墙 (Memory Wall)** 对底层架构设计的限制，这也是本项目实现多种 RL 算法的核心动因：
+
+- **PPO 算法**：标准 PPO 在训练时需要同时在显存中维护 4 个模型（Actor, Critic, Reference, Reward）。即便冻结 Reference 和 Reward，状态价值网络 (Critic) 依然会消耗庞大显存，且 Actor/Critic 之间的梯度反向传播极易引发 OOM。
+- **DPO 算法**：巧妙地将强化学习目标转化为分类交叉熵，直接规避了 Reward 模型，只需 Actor 和 Reference，显存占用大幅减小，但强依赖成对偏好数据 (Chosen/Rejected) 的质量。
+- **GRPO 算法**：借鉴了 DeepSeek-Math 的思想，通过在同一个 Prompt 下采样多个输出形成 Group，利用组内输出的平均 Reward 作为基线，完美替代了独立的 Critic 模型。**成功省去了 1 个大模型的显存开销**，极大提升了单卡环境下的 RLHF 训练可行性与效率。
+
+
+-----
+
+
+## 🧪 模型测试与评估 (Evaluation & Chat)
+
+确保需要测试的模型 `.pth` 权重文件位于 `./out/` 目录下。`-weight` 后面的参数表示要使用哪一种模型权重。
+
 ```bash
-uv run eval_llm.py -weight full_sft # 或 pretrain/dpo/ppo/grpo...
-```
-使用专家模型，则添加use_moe参数
-```bash
+# 测试 SFT 稠密模型 (或 pretrain/dpo/ppo/grpo...)
+uv run eval_llm.py -weight full_sft 
+
+# 测试对应的 MoE 模型
 uv run eval_llm.py -weight full_sft --use_moe 1
 ```
 
-Chat测试：
-```bash
+### 💬 精彩对话示例 (Cherry-picks)
+
+```reStructuredText
 💬: 你有什么特长？
 🤖: 我是一台大型语言模型，可以回答各种问题、提供信息、进行对话和回答问题。我被设计为能够理解和生成自然语言文本，包括但不限于文本、音频、视频、图像和文本等。我的目标是提供准确和有用的信息，以帮助用户更好地理解和生成文本。如果您有任何特定的问题或需要帮助，请随时告诉我，我会尽力回答。
 
